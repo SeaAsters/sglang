@@ -997,7 +997,10 @@ class Glm5NextModel(nn.Module):
         else:
             assert pp_proxy_tensors is not None
             hidden_states = pp_proxy_tensors["hidden_states"]
-            residual = pp_proxy_tensors["residual"]
+            # mHC proxies (hc_hidden_size set) follow the DSV4 single-key
+            # contract: the runner allocates no "residual" buffer because the
+            # mHC boundary residual is None and prepare_attn never consumes it.
+            residual = pp_proxy_tensors.tensors.get("residual")
         device = hidden_states.device
         zero_allocator = BumpAllocator(
             buffer_size=total_num_layers * 2 * (2 if forward_batch.can_run_tbo else 1),
@@ -1075,6 +1078,11 @@ class Glm5NextModel(nn.Module):
             )
 
         if not self.pp_group.is_last_rank:
+            # mHC layers carry no boundary residual (it stays folded into
+            # hidden_states); omit the key so the proxy matches the runner's
+            # single-key mHC buffer contract.
+            if residual is None:
+                return PPProxyTensors({"hidden_states": hidden_states})
             return PPProxyTensors(
                 {
                     "hidden_states": hidden_states,
