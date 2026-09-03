@@ -774,6 +774,26 @@ class NPUMLATokenToKVPool(MLATokenToKVPool):
         item_lens = [self.index_k_buffer[i][0].nbytes for i in range(self.layer_num)]
         return data_ptrs, data_lens, item_lens
 
+    @property
+    def kpool_use_compress(self) -> bool:
+        # PD disaggregation's shared DSA-tail helpers (append_dsa_tail,
+        # get_dsa_tail_state_indices) read this flag off either
+        # DSATokenToKVPool or this pool; the internal name stays private.
+        return self._kpool_use_compress
+
+    def get_compress_tail_buf_infos(self):
+        """Buffer infos for per-request DSA kpool compress-tail rows."""
+        if not self._kpool_use_compress:
+            return [], [], []
+        # Keys first, then scores — keep zero-row (skip-topk) entries so layer
+        # offsets stay aligned across PD peers; item_len=0 makes transfer
+        # backends skip them.
+        tail_buffers = list(self._compress_tail_k) + list(self._compress_tail_score)
+        data_ptrs = [buf.data_ptr() for buf in tail_buffers]
+        data_lens = [buf.nbytes for buf in tail_buffers]
+        item_lens = [buf[0].nbytes if buf.shape[0] > 0 else 0 for buf in tail_buffers]
+        return data_ptrs, data_lens, item_lens
+
     def get_key_buffer(self, layer_id: int):
         if self.layer_transfer_counter is not None:
             self.layer_transfer_counter.wait_until(layer_id - self.start_layer)
