@@ -5,6 +5,9 @@ from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 
+from sglang.kernels.ops.attention.fla.chunk_delta_h import (
+    CHUNK_SIZE as KDA_CHUNK_SIZE,
+)
 from sglang.kernels.ops.mamba.causal_conv1d_triton import PAD_SLOT_ID
 from sglang.kernels.ops.mamba.mamba_state_indices_triton import (
     fused_replay_state_indices,
@@ -356,7 +359,11 @@ class MambaAttnBackendBase(AttentionBackend):
         """src/dst indices to track SSM states for prefix caching: aligned seqs
         cache last_recurrent_state, unaligned cache intermediate `h` at the last
         chunk boundary."""
-        state_chunk_size = self.mamba_chunk_size
+        state_chunk_size = (
+            KDA_CHUNK_SIZE
+            if getattr(self.req_to_token_pool.mamba_pool, "is_kda", False)
+            else self.mamba_chunk_size
+        )
         # CPU to avoid kernel launches for the masking ops
         mamba_track_mask = forward_batch.mamba_track_mask.cpu()
         extend_seq_lens = forward_batch.extend_seq_lens.cpu()

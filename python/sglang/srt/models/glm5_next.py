@@ -32,6 +32,7 @@ from sglang.srt.layers.communicator import (
     get_attn_tp_context,
 )
 from sglang.srt.layers.communicator_mhc import MHCLayerCommunicator
+from sglang.srt.layers.dp_attention import is_dp_attention_enabled
 from sglang.srt.layers.layernorm import RMSNorm
 from sglang.srt.layers.linear import (
     ColumnParallelBatchedLinear,
@@ -104,6 +105,7 @@ from sglang.srt.utils.common import (
     BumpAllocator,
     LazyValue,
     add_prefix,
+    is_npu,
     log_info_on_rank0,
     make_layers,
     set_weight_attrs,
@@ -117,7 +119,21 @@ if _use_aiter_gfx95:
 logger = logging.getLogger(__name__)
 
 
-@torch.compile
+def _remap_glm5_next_weight_name(name: str) -> str:
+    """Map GLM-Next checkpoint names to this runtime's module layout."""
+    if name.startswith("model.language_model."):
+        name = "model." + name.removeprefix("model.language_model.")
+    elif name.startswith("language_model."):
+        name = name.removeprefix("language_model.")
+
+    return (
+        name.replace(".forget_gate.", ".")
+        .replace(".attn_hc.", ".hc_attn_")
+        .replace(".ffn_hc.", ".hc_ffn_")
+    )
+
+
+@torch.compile(disable=is_npu())
 def swiglu_clamped(y: torch.Tensor, limit: float):
     gate, up = torch.chunk(y, 2, dim=-1)
     gate = torch.clamp(gate, max=limit)
@@ -213,6 +229,7 @@ class Glm5NextVisionBlock(GlmOcrVisionBlock):
             prefix=add_prefix("attn", prefix),
             num_dummy_heads=num_dummy_heads,
             use_data_parallel=use_data_parallel,
+            use_dp_attention_reduce=is_dp_attention_enabled(),
         )
         self.mlp = Glm5NextVisionMLP(
             dim,
@@ -1195,11 +1212,18 @@ class Glm5NextForConditionalGeneration(nn.Module):
 
     @classmethod
     def shared_experts_fusion_disable_reason(cls, hf_config, quant_config):
-        # Kept in lockstep with the wrapper gate below: a divergence drops the
-        # shared-expert weights and runs the fused slot uninitialized.
+        """Why this checkpoint cannot fuse its shared expert, or ``None``.
+
+        The loader evaluates this gate before constructing any layers.  GLM5
+        Next is a multimodal wrapper, so use the same text config that is later
+        passed to ``Glm5NextModel``.
+        """
         text_config = getattr(hf_config, "text_config", hf_config)
-        if not getattr(text_config, "n_shared_experts", None):
+        n_shared_experts = getattr(text_config, "n_shared_experts", None)
+        if not n_shared_experts:
             return "No shared experts are defined in the config."
+        if n_shared_experts != 1:
+            return "Only 1 fused shared expert is supported for GLM5 Next."
         if not _is_cuda:
             return "Shared experts fusion currently requires CUDA devices."
         if _device_sm is not None and _device_sm < 80:
@@ -1217,15 +1241,18 @@ class Glm5NextForConditionalGeneration(nn.Module):
         return None
 
     def determine_num_fused_shared_experts(self):
+        # The loader installs the gate's decision before this model and its
+        # nested DeepseekV2MoE layers are constructed.  Both readers must use
+        # this same ACTIVE value; otherwise the outer weight remap can target a
+        # different shared-expert layout than the inner MoE actually allocated.
         self.num_fused_shared_experts = (
             0 if is_shared_experts_fusion_disabled() else self.config.n_shared_experts
         )
-        if self.num_fused_shared_experts == 0:
-            return
-        assert (
-            self.num_fused_shared_experts == 1
-        ), f"Only 1 fused shared expert is supported for {type(self).__name__}"
-        log_info_on_rank0(logger, "Shared experts fusion optimization enabled.")
+        if self.num_fused_shared_experts:
+            assert (
+                self.num_fused_shared_experts == 1
+            ), f"Only 1 fused shared expert is supported for {type(self).__name__}"
+            log_info_on_rank0(logger, "Shared experts fusion optimization enabled.")
 
     def set_eagle3_layers_to_capture(self, layer_ids: Optional[List[int]] = None):
         if not self.pp_group.is_last_rank:
@@ -1411,8 +1438,7 @@ class Glm5NextForConditionalGeneration(nn.Module):
             if getattr(self, "language_only", False) and is_visual_weight:
                 continue
 
-            if "language_model." in name:
-                name = name.replace("language_model.", "")
+            name = _remap_glm5_next_weight_name(name)
             if "model.visual." in name:
                 name = name.replace("model.visual.", "visual.")
 

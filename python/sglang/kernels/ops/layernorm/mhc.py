@@ -18,7 +18,7 @@ from sglang.srt.environ import envs
 from sglang.srt.layers.attention.dsa.utils import is_dsa_prefill_cp_round_robin_split
 from sglang.srt.layers.dp_attention import is_allocation_symmetric
 from sglang.srt.layers.utils.common import strict_contiguous
-from sglang.srt.utils.common import is_gfx1250_supported
+from sglang.srt.utils.common import is_gfx1250_supported, is_npu
 
 logger = logging.getLogger(__name__)
 
@@ -1874,6 +1874,10 @@ def _mhc_post_dispatch(
 ) -> torch.Tensor:
     assert x.dim() == 2 and residual.dim() == 3
     assert post_layer_mix.dim() == 3 and comb_res_mix.dim() == 3
+    if is_npu():
+        return torch.ops.custom.npu_hc_post(
+            x, residual, post_layer_mix.squeeze(-1), comb_res_mix
+        )
     if not envs.SGLANG_OPT_USE_TILELANG_MHC_POST.get():
         return _mhc_post_torch(x, residual, post_layer_mix, comb_res_mix)
     return mhc_post(x, residual, post_layer_mix, comb_res_mix)
@@ -1905,19 +1909,32 @@ def hc_pre(
 
     fn = hc_fn if hc_norm_weight is None else hc_fn * hc_norm_weight
     residual_3d = x.view(s, hc_mult, hidden_size)
-    post_mix, comb_mix, layer_input, norm_fused = _mhc_pre_dispatch(
-        residual=residual_3d,
-        fn=fn,
-        hc_scale=hc_scale,
-        hc_base=hc_base,
-        rms_eps=rms_eps,
-        hc_pre_eps=hc_eps,
-        hc_sinkhorn_eps=hc_eps,
-        hc_post_mult_value=post_mult_value,
-        sinkhorn_repeat=sinkhorn_iters,
-        norm_weight=out_norm_weight,
-        norm_eps=out_norm_eps,
-    )
+    if is_npu():
+        y, post, comb = torch.ops.custom.npu_hc_pre(
+            residual_3d,
+            fn,
+            hc_scale,
+            hc_base,
+            hc_mult=hc_mult,
+            hc_sinkhorn_iters=sinkhorn_iters,
+            norm_eps=rms_eps,
+            hc_eps=hc_eps,
+        )
+        post_mix, comb_mix, layer_input, norm_fused = post, comb, y, False
+    else:
+        post_mix, comb_mix, layer_input, norm_fused = _mhc_pre_dispatch(
+            residual=residual_3d,
+            fn=fn,
+            hc_scale=hc_scale,
+            hc_base=hc_base,
+            rms_eps=rms_eps,
+            hc_pre_eps=hc_eps,
+            hc_sinkhorn_eps=hc_eps,
+            hc_post_mult_value=post_mult_value,
+            sinkhorn_repeat=sinkhorn_iters,
+            norm_weight=out_norm_weight,
+            norm_eps=out_norm_eps,
+        )
     return (
         layer_input,
         comb_mix.reshape(s, hc_mult * hc_mult),
