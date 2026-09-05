@@ -1500,9 +1500,7 @@ class KVCacheConfigurator:
             dsa_pool_kwargs = {
                 "index_kpool": get_dsa_index_kpool(hf_config),
                 "index_kpool_compress": get_dsa_index_kpool_compress(hf_config),
-                "tail_extra_slots": (
-                    self.server_args.max_speculative_num_draft_tokens or 0
-                ),
+                "tail_extra_slots": (max_speculative_num_draft_tokens() or 0),
                 # Tail buffers are indexed by request slot, so their capacity
                 # must cover all concurrent requests.
                 "max_running_requests": max_running_requests,
