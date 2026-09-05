@@ -1624,6 +1624,21 @@ class Glm5NextForConditionalGeneration(nn.Module):
         DeepseekV2WeightLoaderMixin.post_load_weights(
             self, is_nextn=is_nextn, weight_names=weight_names
         )
+        # The DSA NPU forward path unconditionally bmm's w_kc; catch a silently
+        # skipped kv_b_proj post-process at load time instead of failing later
+        # inside CUDA-graph capture.
+        for layer_id in range(self.model.start_layer, self.model.end_layer):
+            attn = getattr(self.model.layers[layer_id], "self_attn", None)
+            if (
+                attn is not None
+                and getattr(attn, "use_dsa", False)
+                and attn.w_kc is None
+            ):
+                raise RuntimeError(
+                    f"post_load_weights left w_kc unset for DSA layer {layer_id} "
+                    f"(local layers [{self.model.start_layer}, {self.model.end_layer})); "
+                    "kv_b_proj was not processed"
+                )
 
     def load_kv_cache_scales(self, quantization_param_path: str) -> None:
         if self.model is None:
