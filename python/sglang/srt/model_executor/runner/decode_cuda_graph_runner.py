@@ -290,6 +290,9 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
 
         self.attn_tp_size = get_parallel().attn_tp_size
         self.attn_tp_rank = get_parallel().attn_tp_rank
+        # A2A-MoE models leave the PP-boundary hidden states scattered across
+        # the attn-TP group (num_tokens // attn_tp_size rows per rank).
+        self.pp_proxy_input_scattered = model_runner.is_pp_proxy_input_scattered()
         # True if a DSACPLayerCommunicator-style prefill-CP flavor is active
         # (DSA or MLA). These flavors feed a zigzag-split rank-local layout
         # into the runner; MHA-arch prefill CP (Qwen3/Qwen2 MoE via PR
@@ -439,6 +442,9 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
             pp_proxy_topk_size=self.model_runner.get_pp_proxy_topk_size(),
             pp_proxy_residual_num_blocks=(
                 self.model_runner.get_pp_proxy_residual_num_blocks()
+            ),
+            pp_proxy_num_token_divisor=(
+                self.attn_tp_size if self.pp_proxy_input_scattered else 1
             ),
         )
         self.buffers.share_buffers()
@@ -932,8 +938,17 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
         pp_proxy_tensors = None
         # pipeline parallelism
         if self.pp_size > 1:
+            num_rows = num_tokens
+            if self.pp_proxy_input_scattered:
+                # Scattered boundary: each rank owns num_tokens // attn_tp_size
+                # rows; the first local layer's all-gather restores the full count.
+                assert num_tokens % self.attn_tp_size == 0, (
+                    f"scattered PP-boundary capture needs num_tokens divisible "
+                    f"by attn_tp_size, got {num_tokens} % {self.attn_tp_size}"
+                )
+                num_rows //= self.attn_tp_size
             pp_proxy_tensors = PPProxyTensors(
-                {k: v[:num_tokens] for k, v in buffers.pp_proxy_tensors.items()}
+                {k: v[:num_rows] for k, v in buffers.pp_proxy_tensors.items()}
             )
 
         if self.require_mlp_tp_gather:

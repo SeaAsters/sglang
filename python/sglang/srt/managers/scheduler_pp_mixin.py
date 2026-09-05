@@ -554,8 +554,13 @@ class SchedulerPPMixin:
     def init_pp_loop_state(self: Scheduler):
         self.pp_loop_size: int = self.ps.pp_size + get_parallel().pp_async_batch_depth
         # In CP mode, attention weights are duplicated, eliminating the need for the attention TP all-gather operation.
+        # A2A-MoE models (e.g. deepep) leave the PP-boundary hidden states scattered across the
+        # attn-TP group; the send-slice + recv-all-gather transport assumes replicated tensors
+        # and would scramble them, so those ranks must transfer per-rank tensors as-is.
         self.require_attn_tp_allgather = (
             not get_parallel().enable_dsa_prefill_context_parallel
+            and not self.tp_worker.model_runner.is_pp_proxy_input_scattered()
+            and not self.tp_worker.model_runner.is_pp_proxy_output_scattered()
         )
         self.mbs = [None] * self.pp_loop_size
         self.last_mbs = [None] * self.pp_loop_size
