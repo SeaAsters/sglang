@@ -190,6 +190,10 @@ class DynamicChunkSizer:
                 False,
                 self.spec_algorithm,
             )
+            # prepare_mlp_sync_batch resets the global is_extend_in_batch flag
+            # from this field; False would send this extend batch through
+            # deepep low-latency dispatch and overflow its token budget.
+            batch.is_extend_in_batch = True
 
             current_seq_len = req.extend_range.end
 
