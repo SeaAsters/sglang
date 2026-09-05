@@ -1,3 +1,4 @@
+import logging
 from typing import TYPE_CHECKING, List, Optional, Tuple
 
 import torch
@@ -14,6 +15,8 @@ from sglang.srt.mem_cache.memory_pool import (
 )
 from sglang.srt.utils import get_bool_env_var
 from sglang.srt.utils.common import is_npu
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from sglang.srt.layers.radix_attention import RadixAttention
@@ -821,25 +824,37 @@ class NPUMLATokenToKVPool(MLATokenToKVPool):
     # for disagg
     def get_contiguous_buf_infos(self):
         # MLA has only one kv_buffer, so only the information of this buffer needs to be returned.
-        kv_data_ptrs = [self.k_buffer[i].data_ptr() for i in range(self.layer_num)] + [
-            self.v_buffer[i].data_ptr() for i in range(self.layer_num)
-        ]
-        kv_data_lens = [self.k_buffer[i].nbytes for i in range(self.layer_num)] + [
-            self.v_buffer[i].nbytes for i in range(self.layer_num)
-        ]
-        kv_item_lens = [self.k_buffer[i][0].nbytes for i in range(self.layer_num)] + [
-            self.v_buffer[i][0].nbytes for i in range(self.layer_num)
-        ]
+        sections = [("k", self.k_buffer), ("v", self.v_buffer)]
         if self.index_head_dim is not None:
-            kv_data_ptrs += [
-                self.index_k_buffer[i].data_ptr() for i in range(self.layer_num)
-            ]
-            kv_data_lens += [
-                self.index_k_buffer[i].nbytes for i in range(self.layer_num)
-            ]
-            kv_item_lens += [
-                self.index_k_buffer[i][0].nbytes for i in range(self.layer_num)
-            ]
+            sections.append(("index_k", self.index_k_buffer))
+        kv_data_ptrs, kv_data_lens, kv_item_lens = [], [], []
+        skipped_empty = []
+        for name, bufs in sections:
+            for i in range(self.layer_num):
+                buf = bufs[i]
+                if buf.numel() == 0:
+                    # Zero-size placeholder (e.g. v/rope cache when
+                    # qk_rope_head_dim == 0); skipping keeps the registration
+                    # free of null ptrs and PD-symmetric.
+                    skipped_empty.append((name, i))
+                    continue
+                kv_data_ptrs.append(buf.data_ptr())
+                kv_data_lens.append(buf.nbytes)
+                kv_item_lens.append(buf[0].nbytes)
+        if skipped_empty:
+            logger.info(
+                f"[PD] {type(self).__name__} skips zero-size KV buffers: {skipped_empty}"
+            )
+        zero_bufs = [
+            (name, i)
+            for name, bufs in sections
+            for i in range(self.layer_num)
+            if bufs[i].numel() != 0 and bufs[i].data_ptr() == 0
+        ]
+        if zero_bufs:
+            logger.error(
+                f"[PD] {type(self).__name__} has non-empty null-ptr buffers: {zero_bufs}"
+            )
         return kv_data_ptrs, kv_data_lens, kv_item_lens
 
     def set_kv_buffer(
