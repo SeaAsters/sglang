@@ -18,7 +18,7 @@ from sglang.srt.environ import envs
 from sglang.srt.layers.attention.dsa.utils import is_dsa_prefill_cp_round_robin_split
 from sglang.srt.layers.dp_attention import is_allocation_symmetric
 from sglang.srt.layers.utils.common import strict_contiguous
-from sglang.srt.utils.common import is_gfx1250_supported, is_npu
+from sglang.srt.utils.common import is_gfx1250_supported, is_npu, is_npu_a5
 
 logger = logging.getLogger(__name__)
 
@@ -1835,7 +1835,7 @@ def _mhc_pre_dispatch(
     norm_eps: float | None = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, bool]:
     assert residual.dim() == 3, f"residual must be (s, n, h); got {residual.shape}"
-    if not envs.SGLANG_OPT_USE_TILELANG_MHC_PRE.get():
+    if is_npu_a5() or not envs.SGLANG_OPT_USE_TILELANG_MHC_PRE.get():
         post_mix, comb_mix, layer_input = _mhc_pre_torch(
             residual=residual,
             fn=fn,
@@ -1874,11 +1874,11 @@ def _mhc_post_dispatch(
 ) -> torch.Tensor:
     assert x.dim() == 2 and residual.dim() == 3
     assert post_layer_mix.dim() == 3 and comb_res_mix.dim() == 3
-    if is_npu():
+    if is_npu() and not is_npu_a5():
         return torch.ops.custom.npu_hc_post(
             x, residual, post_layer_mix.squeeze(-1), comb_res_mix
         )
-    if not envs.SGLANG_OPT_USE_TILELANG_MHC_POST.get():
+    if is_npu_a5() or not envs.SGLANG_OPT_USE_TILELANG_MHC_POST.get():
         return _mhc_post_torch(x, residual, post_layer_mix, comb_res_mix)
     return mhc_post(x, residual, post_layer_mix, comb_res_mix)
 
@@ -1909,7 +1909,7 @@ def hc_pre(
 
     fn = hc_fn if hc_norm_weight is None else hc_fn * hc_norm_weight
     residual_3d = x.view(s, hc_mult, hidden_size)
-    if is_npu():
+    if is_npu() and not is_npu_a5():
         y, post, comb = torch.ops.custom.npu_hc_pre(
             residual_3d,
             fn,

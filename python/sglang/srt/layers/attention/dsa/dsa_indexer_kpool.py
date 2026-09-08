@@ -18,7 +18,7 @@ from sglang.srt.layers.attention.dsa.dsa_indexer import (
 from sglang.srt.layers.attention.dsa.dsa_topk_backend import TopkTransformMethod
 from sglang.srt.layers.layernorm import LayerNorm
 from sglang.srt.layers.utils import MultiPlatformOp
-from sglang.srt.utils import add_prefix, ceil_align, is_cuda, is_hip, is_npu
+from sglang.srt.utils import add_prefix, ceil_align, is_cuda, is_hip, is_npu, is_npu_a5
 
 if is_cuda():
     try:
@@ -26,7 +26,7 @@ if is_cuda():
     except ImportError as e:
         deep_gemm = e
 
-if is_npu():
+if is_npu() and not is_npu_a5():
     import custom_ops  # noqa: F401
 
 from sglang.srt.environ import envs
@@ -195,6 +195,23 @@ def _expand_pool_topk_and_append_tail_batched_npu(
         )
 
     return out[:, :out_cols]
+
+
+def _a5_full_topk_for_short_sequences(topk_result, causal_lens):
+    """Select all causal tokens below the A5 2048-token sparse threshold.
+
+    Use device lengths, not a Python max(seq_lens_cpu) branch: a captured
+    decode graph must keep working as requests cross the threshold.
+    """
+    n_real = min(topk_result.shape[0], causal_lens.shape[0])
+    lengths = causal_lens[:n_real].to(torch.int32).unsqueeze(1)
+    indices = torch.arange(
+        topk_result.shape[1], dtype=torch.int32, device=topk_result.device
+    ).unsqueeze(0)
+    full = torch.where(indices < lengths, indices, -1)
+    result = torch.full_like(topk_result, -1)
+    result[:n_real] = torch.where(lengths < 2048, full, topk_result[:n_real])
+    return result
 
 
 class IndexerKPool(MultiPlatformOp):
@@ -1776,7 +1793,7 @@ class IndexerKPool(MultiPlatformOp):
             w_bf16, pool_seqlens, pool_block_tables = (
                 self._prepare_decode_indexer_inputs_npu(x, metadata)
             )
-            return self._get_topk_paged_npu(
+            topk_result = self._get_topk_paged_npu(
                 forward_batch,
                 layer_id,
                 query,
@@ -1784,6 +1801,7 @@ class IndexerKPool(MultiPlatformOp):
                 metadata,
                 prepared=(pool_seqlens, pool_block_tables),
             )
+            return self._fix_short_sequence_topk_a5(topk_result, metadata, mode)
 
         # ── Compute weights (logits head gate) ──
         # NPU uses BF16 (no FP8 quant), so q_scale = 1 (no act_quant).
@@ -1831,7 +1849,17 @@ class IndexerKPool(MultiPlatformOp):
                 f"NPU kpool does not support forward_mode={forward_batch.forward_mode}"
             )
 
-        return topk_result
+        return self._fix_short_sequence_topk_a5(topk_result, metadata, mode)
+
+    def _fix_short_sequence_topk_a5(self, topk_result, metadata, mode):
+        if not is_npu_a5() or self.index_topk < 2048:
+            return topk_result
+        causal_lens = (
+            metadata.get_seqlens_int32()
+            if mode.is_decode_or_idle()
+            else metadata.get_seqlens_expanded()
+        )
+        return _a5_full_topk_for_short_sequences(topk_result, causal_lens)
 
     def _compress_write_mtp_npu(
         self,
@@ -1901,7 +1929,7 @@ class IndexerKPool(MultiPlatformOp):
         from sglang.srt.layers.attention.dsa.kpool_bf16_index import (
             compute_pooled_write_locs,
             kpool_softmax_write_cache_bf16,
-            scatter_kpool_tail_updates_bf16,
+            scatter_kpool_tail_updates_bf16,  # noqa: F401
         )
 
         assert (

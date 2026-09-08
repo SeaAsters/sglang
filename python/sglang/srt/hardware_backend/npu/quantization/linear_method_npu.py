@@ -304,6 +304,96 @@ class NPUMXFP8LinearMethod(_NPULinearMethodBase):
         return output.reshape(output_shape)
 
 
+def prepare_npu_block_fp8_linear_weights(layer, block_size: list[int]) -> None:
+    """Convert checkpoint block FP8 to the A5 dense matmul's MX layout.
+
+    This rounds scales to powers of two and requantizes FP8 weights, so it is
+    deliberately restricted to the A5 consumer. It is not lossless.
+    """
+    weight = layer.weight.data
+    scale = layer.weight_scale_inv.data
+    if block_size != [128, 128] or weight.dtype != torch.float8_e4m3fn:
+        raise ValueError("A5 block FP8 linear requires E4M3 [128, 128] weights")
+    n, k = weight.shape
+    if k % 128 or tuple(scale.shape) != ((n + 127) // 128, k // 128):
+        raise ValueError("Invalid A5 block FP8 weight/scale shape")
+    e8m0_dtype = _get_float8_e8m0fnu_dtype()
+    if e8m0_dtype is None:
+        raise RuntimeError("A5 block FP8 linear requires float8_e8m0fnu")
+
+    exponent = torch.ceil(torch.log2(scale.clamp(min=1e-38)))
+    rounded_scale = torch.pow(2.0, exponent)
+    ratio = scale / rounded_scale
+    ratio_expanded = ratio.repeat_interleave(128, 0).repeat_interleave(128, 1)
+    adjusted = (weight.float() * ratio_expanded[:n, :k]).to(torch.float8_e4m3fn)
+
+    # Each 128x128 block becomes four K/32 scales for each output channel.
+    # Pack pairs of K/32 scales into [K/64, N, 2], before viewing as E8M0:
+    # contiguous() on an E8M0 NPU tensor is unsupported in the A5 stack.
+    encoded = (exponent + 127).clamp(0, 255).to(torch.uint8)
+    expanded = encoded.repeat_interleave(128, 0).repeat_interleave(4, 1)[:n]
+    packed = expanded.transpose(0, 1).reshape(k // 64, 2, n).transpose(1, 2)
+    layer.weight.data = adjusted.transpose(0, 1).contiguous()
+    layer.weight_scale_inv.data = packed.contiguous().view(e8m0_dtype)
+
+
+def npu_w8a8_block_fp8_linear(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    block_size: list[int],
+    weight_scale: torch.Tensor,
+    input_scale: Optional[torch.Tensor] = None,
+    bias: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Block-FP8 linear on Atlas A5, used as the ``w8a8_block_fp8_linear``
+    backend on NPU (see ``fp8_utils._dispatch_auto_backend``).
+
+    Replaces the Triton ``w8a8_block_fp8_matmul_triton`` kernel which produces
+    NaN on NPU for certain matrix dimensions.  Uses ``npu_quant_matmul`` with
+    MXFP8 activation quantisation (block_size=32) and the model's [128, 128]
+    block weight scale reinterpreted into the A5 MXFP8 layout by
+    ``Fp8LinearMethod.process_weights_after_loading``.
+    """
+    if block_size != [128, 128]:
+        raise ValueError(
+            f"npu_w8a8_block_fp8_linear only supports block_size [128, 128], "
+            f"got {block_size}"
+        )
+    if weight.dtype != torch.float8_e4m3fn:
+        raise ValueError(
+            f"npu_w8a8_block_fp8_linear expects float8_e4m3fn weights, "
+            f"got {weight.dtype}"
+        )
+
+    if input_scale is not None:
+        raise ValueError("A5 block FP8 linear requires dynamic activation scales")
+
+    orig_shape = input.shape
+    input_2d = input.reshape(-1, orig_shape[-1]).contiguous()
+
+    # MXFP8 activation quantisation (block_size=32, e8m0 scale).  Weight and
+    # scale are pre-processed in Fp8LinearMethod.process_weights_after_loading:
+    # weight transposed [K, N] (ND format, no NZ), scale [K//64, N, 2] E8M0.
+    if input_2d.shape[0] == 0:
+        return input.new_empty((*orig_shape[:-1], weight.shape[-1]))
+    x_fp8, x_scale = torch.ops.npu.npu_dynamic_mx_quant(
+        input_2d, dst_type=torch.float8_e4m3fn
+    )
+    e8m0_dtype = _get_float8_e8m0fnu_dtype()
+    output_2d = torch.ops.npu.npu_quant_matmul(
+        x_fp8,
+        weight,
+        scale=weight_scale,
+        scale_dtype=e8m0_dtype,
+        pertoken_scale=x_scale,
+        pertoken_scale_dtype=e8m0_dtype,
+        bias=bias,
+        output_dtype=input.dtype,
+        group_sizes=(1, 1, MXFP8_BLOCK_SIZE),
+    )
+    return output_2d.reshape(*orig_shape[:-1], output_2d.shape[-1])
+
+
 class NPU_W4A4DynamicLinearMethod(_NPULinearMethodBase):
     def process_weights_after_loading(self, layer):
         layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()

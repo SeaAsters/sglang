@@ -45,6 +45,7 @@ from sglang.srt.utils import (
     is_gfx1250_supported,
     is_hip,
     is_musa,
+    is_npu_a5,
     is_xpu,
     offloader,
 )
@@ -777,6 +778,13 @@ def _dispatch_explicit_backend(backend: Fp8GemmRunnerBackend) -> Callable:
 
 def _dispatch_auto_backend() -> Callable:
     """Auto-select the best backend based on hardware capabilities."""
+    if is_npu_a5():
+        from sglang.srt.hardware_backend.npu.quantization.linear_method_npu import (
+            npu_w8a8_block_fp8_linear,
+        )
+
+        return npu_w8a8_block_fp8_linear
+
     # Priority order for auto selection:
     # 1. DeepGEMM (if enabled and available)
     # 2. FlashInfer TRTLLM (if Blackwell GPU and FlashInfer available)

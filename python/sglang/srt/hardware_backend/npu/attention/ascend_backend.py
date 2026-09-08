@@ -35,6 +35,7 @@ from sglang.srt.speculative.spec_info import SpecInput, SpecInputType
 from sglang.srt.utils import (
     get_bool_env_var,
     get_current_device_stream_fast,
+    is_npu_a5,
     next_power_of_2,
 )
 
@@ -1102,7 +1103,10 @@ class AscendAttnBackend(AttentionBackend):
         # SFA's MLA interface requires a fixed 64-dimensional query_rope even
         # for models without RoPE. Keep the model/cache contract at dimension 0
         # and materialize an operator-only zero tensor here.
-        if self.qk_rope_head_dim == 0:
+        if self.qk_rope_head_dim == 0 and is_npu_a5():
+            k_pe = self._a5_zero_rope(k_nope, (*k_nope.shape[:-1], 64))
+            q_pe = self._a5_zero_rope(q_nope, (q.shape[0], layer.tp_q_head_num, 64))
+        elif self.qk_rope_head_dim == 0:
             k_pe = k_nope.new_zeros(
                 (*k_nope.shape[:-1], 64)
             )
@@ -1192,6 +1196,15 @@ class AscendAttnBackend(AttentionBackend):
             )
 
         return attn_out
+
+    def _a5_zero_rope(self, reference, shape):
+        # Cache the large pool-shaped dummy across graph captures/layers.
+        if not hasattr(self, "_a5_zero_rope_cache"):
+            self._a5_zero_rope_cache = {}
+        key = (tuple(shape), reference.dtype, reference.device)
+        if key not in self._a5_zero_rope_cache:
+            self._a5_zero_rope_cache[key] = reference.new_zeros(shape)
+        return self._a5_zero_rope_cache[key]
 
     def forward_extend(
         self,

@@ -17,6 +17,7 @@ from sglang.srt.layers.attention.dsa.utils import (
 )
 from sglang.srt.layers.communicator import ScatterMode, get_attn_tp_context
 from sglang.srt.model_executor.forward_context import get_token_to_kv_pool
+from sglang.srt.utils import is_npu_a5
 
 if TYPE_CHECKING:
     from sglang.srt.model_executor.forward_batch_info import ForwardBatch
@@ -518,7 +519,7 @@ def forward_dsa_core_npu(
         device=attn_output.device,
     )
 
-    if (
+    if is_npu_a5() or (
         forward_batch.forward_mode.is_extend()
         and not forward_batch.forward_mode.is_draft_extend_v2()
         and not forward_batch.forward_mode.is_target_verify()
