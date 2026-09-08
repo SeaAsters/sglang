@@ -224,6 +224,7 @@ class Glm5NextVisionBlock(GlmOcrVisionBlock):
             qkv_bias=attn_qkv_bias,
             proj_bias=True,
             qk_normalization_by_head_size=True,
+            layer_norm_eps=rms_norm_eps,
             flatten_batch=True,
             quant_config=quant_config,
             prefix=add_prefix("attn", prefix),
