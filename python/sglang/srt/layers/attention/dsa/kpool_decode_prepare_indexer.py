@@ -20,6 +20,7 @@ kernels:
 """
 
 import torch
+import torch.nn.functional as F
 import torch_npu
 import triton
 import triton.language as tl
@@ -207,10 +208,17 @@ def fused_decode_prepare_indexer(
         f"block_tables.shape[0]={block_tables.shape[0]} != N={N}"
     )
     NUM_BLOCKS = block_tables.shape[1]
+    # The split-based ::pool extraction below needs a pool_size-multiple
+    # width. Short decode sequences (e.g. a 1-block warmup request) can leave
+    # the table narrower than pool_size; pad with dummy pages — entries past
+    # pool_seqlens (= seqlens_32 // pool_size) are never consumed downstream,
+    # and padded width == ceil-div of the real width, matching the torch-side
+    # build_pooled_page_table_64 slicing.
+    padded_blocks = -(-NUM_BLOCKS // pool_size) * pool_size or pool_size
+    if padded_blocks != NUM_BLOCKS:
+        block_tables = F.pad(block_tables, (0, padded_blocks - NUM_BLOCKS))
+    NUM_BLOCKS = padded_blocks
     N_POOL = NUM_BLOCKS // pool_size
-    assert NUM_BLOCKS % pool_size == 0, (
-        f"NUM_BLOCKS={NUM_BLOCKS} not divisible by pool_size={pool_size}"
-    )
 
     # 2. hyper-params (fixed internally, not exposed)
     block_b = 32
