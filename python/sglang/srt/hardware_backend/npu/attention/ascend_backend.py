@@ -37,6 +37,7 @@ from sglang.srt.utils import (
     get_current_device_stream_fast,
     is_npu_a5,
     next_power_of_2,
+    temp_debug_comm,
 )
 
 if TYPE_CHECKING:
@@ -1088,6 +1089,12 @@ class AscendAttnBackend(AttentionBackend):
             and not forward_batch.forward_mode.is_draft_extend_v2()
             and not forward_batch.forward_mode.is_target_verify()
         )
+        temp_debug_comm(
+            "sparse_attn_enter",
+            layer=layer.layer_id,
+            tokens=q.shape[0],
+            prefill=is_prefill,
+        )
 
         if save_kv_cache:
             k = k.view(-1, layer.tp_k_head_num, self.kv_lora_rank)
@@ -1172,6 +1179,11 @@ class AscendAttnBackend(AttentionBackend):
             if topk_indices is not None:
                 topk_indices = self._pad_topk_indices(topk_indices, q_nope.shape[0])
             topk_indices = _expand_dsa_sparse_indices(topk_indices)
+            temp_debug_comm(
+                "sparse_flash_pre",
+                layer=layer.layer_id,
+                tokens=q_nope.shape[0],
+            )
             attn_out, _, _ = torch_npu.npu_sparse_flash_attention(
                 query=q_nope,
                 key=k_nope,
@@ -1194,7 +1206,9 @@ class AscendAttnBackend(AttentionBackend):
                 attention_mode=2,
                 return_softmax_lse=False,
             )
+            temp_debug_comm("sparse_flash_post", layer=layer.layer_id)
 
+        temp_debug_comm("sparse_attn_exit", layer=layer.layer_id)
         return attn_out
 
     def _a5_zero_rope(self, reference, shape):

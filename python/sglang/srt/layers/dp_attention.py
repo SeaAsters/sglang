@@ -39,7 +39,7 @@ from sglang.srt.runtime_context import (
     get_resources,
     get_stream,
 )
-from sglang.srt.utils import get_bool_env_var, is_cpu, is_hip
+from sglang.srt.utils import get_bool_env_var, is_cpu, is_hip, temp_debug_comm
 
 if TYPE_CHECKING:
     from sglang.srt.configs.model_config import ModelConfig
@@ -818,6 +818,12 @@ def _dp_gather(
     forward_batch: ForwardBatch,
     is_partial: bool,
 ):
+    temp_debug_comm(
+        "dp_gather",
+        partial=is_partial,
+        local=local_tokens.shape[0],
+        global_=global_tokens.shape[0],
+    )
     if (
         is_dp_gatherv_active()
         and forward_batch.dp_padding_mode is not None
@@ -875,6 +881,11 @@ def dp_scatter(
     global_tokens: torch.Tensor,  # input
     forward_batch: ForwardBatch,
 ):
+    temp_debug_comm(
+        "dp_scatter",
+        local=local_tokens.shape[0],
+        global_=global_tokens.shape[0],
+    )
     # local_num_tokens is not necessarily the same as local_tokens.shape[0],
     # since local_tokens may be padded for cuda graph
     local_start_pos, local_num_tokens = get_dp_local_info(forward_batch)

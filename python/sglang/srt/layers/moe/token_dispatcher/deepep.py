@@ -36,6 +36,7 @@ from sglang.srt.utils import (
     is_hip,
     is_npu,
     load_json_config,
+    temp_debug_comm,
 )
 
 _is_npu = is_npu()
@@ -538,6 +539,14 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
         return hidden_states, topk_ids, topk_weights, previous_event
 
     def dispatch_b(self, hidden_states, topk_ids, topk_weights, previous_event):
+        temp_debug_comm(
+            "deepep_dispatch_enter",
+            tokens=(
+                hidden_states.shape[0]
+                if not isinstance(hidden_states, tuple)
+                else hidden_states[0].shape[0]
+            ),
+        )
         (
             hidden_states,
             topk_ids,
@@ -546,6 +555,7 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
             event,
         ) = self._dispatch_core(hidden_states, topk_ids, topk_weights, previous_event)
         event.current_stream_wait() if self.async_finish else ()
+        temp_debug_comm("deepep_dispatch_exit")
 
         if isinstance(hidden_states, tuple):
             hidden_states, hidden_states_scale = hidden_states
@@ -638,10 +648,12 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
         return output, previous_event
 
     def combine_b(self, output, previous_event):
+        temp_debug_comm("deepep_combine_enter", tokens=output.shape[0])
         hidden_states, event = self._combine_core(output, previous_event)
         event.current_stream_wait() if self.async_finish else ()
         self.handle = None
         self.src2dst = None
+        temp_debug_comm("deepep_combine_exit")
         return hidden_states
 
     def _combine_core(self, x: torch.Tensor, previous_event):
