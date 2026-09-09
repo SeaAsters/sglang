@@ -225,6 +225,8 @@ class Glm5NextVisionBlock(GlmOcrVisionBlock):
             proj_bias=True,
             qk_normalization_by_head_size=True,
             layer_norm_eps=rms_norm_eps,
+            # Match the reference vision RoPE: rotate in FP32, then cast Q/K back.
+            rotary_embedding_in_fp32=is_npu(),
             flatten_batch=True,
             quant_config=quant_config,
             prefix=add_prefix("attn", prefix),
@@ -274,6 +276,8 @@ class Glm5NextVisionModel(GlmOcrVisionModel):
             max_position=8192,
             base=10000.0,
             is_neox_style=True,
+            # NPU otherwise rounds this cache to the model's default BF16 dtype.
+            dtype=torch.float32 if is_npu() else None,
         )
 
         self.blocks = nn.ModuleList(
