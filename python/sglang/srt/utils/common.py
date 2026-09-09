@@ -121,7 +121,7 @@ torch_release = pkg_version.parse(torch.__version__).release
 _temp_debug_comm_enabled: Optional[bool] = None
 
 
-def temp_debug_comm(event: str, **fields) -> None:
+def temp_debug_comm_enabled() -> bool:
     global _temp_debug_comm_enabled
     if _temp_debug_comm_enabled is None:
         import os
@@ -129,7 +129,11 @@ def temp_debug_comm(event: str, **fields) -> None:
         _temp_debug_comm_enabled = (
             os.environ.get("SGLANG_TEMP_DEBUG_COMM", "0") == "1"
         )
-    if not _temp_debug_comm_enabled:
+    return _temp_debug_comm_enabled
+
+
+def temp_debug_comm(event: str, **fields) -> None:
+    if not temp_debug_comm_enabled():
         return
     import time
 

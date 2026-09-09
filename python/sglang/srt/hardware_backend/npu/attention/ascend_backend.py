@@ -38,6 +38,7 @@ from sglang.srt.utils import (
     is_npu_a5,
     next_power_of_2,
     temp_debug_comm,
+    temp_debug_comm_enabled,
 )
 
 if TYPE_CHECKING:
@@ -1096,7 +1097,13 @@ class AscendAttnBackend(AttentionBackend):
             prefill=is_prefill,
         )
 
+        _dbg_meta = temp_debug_comm_enabled() and is_prefill and q.shape[0] > 0
+        if _dbg_meta:
+            self._temp_debug_sparse_meta(forward_batch, q, topk_indices)
+
         if save_kv_cache:
+            if _dbg_meta:
+                temp_debug_comm("kv_write_pre", layer=layer.layer_id)
             k = k.view(-1, layer.tp_k_head_num, self.kv_lora_rank)
             k_rope = k_rope.reshape(
                 k_rope.shape[0], layer.tp_k_head_num, self.qk_rope_head_dim
@@ -1104,8 +1111,14 @@ class AscendAttnBackend(AttentionBackend):
             self.token_to_kv_pool.set_kv_buffer(
                 layer, forward_batch.out_cache_loc, k, k_rope
             )
+            if _dbg_meta:
+                temp_debug_comm("kv_write_post", layer=layer.layer_id)
         q_nope, q_pe = q, q_rope
+        if _dbg_meta:
+            temp_debug_comm("kv_read_pre", layer=layer.layer_id)
         k_nope, k_pe = self.token_to_kv_pool.get_kv_buffer(layer.layer_id)
+        if _dbg_meta:
+            temp_debug_comm("kv_read_post", layer=layer.layer_id)
 
         # SFA's MLA interface requires a fixed 64-dimensional query_rope even
         # for models without RoPE. Keep the model/cache contract at dimension 0
@@ -1210,6 +1223,45 @@ class AscendAttnBackend(AttentionBackend):
 
         temp_debug_comm("sparse_attn_exit", layer=layer.layer_id)
         return attn_out
+
+    def _temp_debug_sparse_meta(self, forward_batch, q, topk_indices):
+        # TEMP-DEBUG(comm) round 2: dump the metadata consumed by the sparse
+        # attention kernels to catch corrupted PP1-side indices. The .cpu()
+        # sync below also acts as a probe: if "sparse_meta" never prints, the
+        # hang comes from kernels enqueued before the attention segment.
+        def _stat(x):
+            if x is None:
+                return "None"
+            try:
+                xv = x.detach().to("cpu").flatten()
+                if xv.numel() == 0:
+                    return "empty"
+                if xv.is_floating_point():
+                    return (
+                        f"shape={tuple(x.shape)} min={xv.min().item():.4g}"
+                        f" max={xv.max().item():.4g}"
+                    )
+                return (
+                    f"shape={tuple(x.shape)} min={xv.min().item()}"
+                    f" max={xv.max().item()} head={xv[:10].tolist()}"
+                )
+            except Exception as e:  # noqa: BLE001
+                return f"err={e!r}"
+
+        fb = forward_batch
+        md = self.forward_metadata
+        temp_debug_comm(
+            "sparse_meta",
+            tokens=q.shape[0],
+            out_cache_loc=_stat(fb.out_cache_loc),
+            extend_seq_lens=_stat(fb.extend_seq_lens),
+            seq_lens=_stat(getattr(md, "seq_lens", None)),
+            seq_lens_cpu_int=_stat(getattr(md, "seq_lens_cpu_int", None)),
+            actual_seq_q=_stat(getattr(md, "actual_seq_lengths_q", None)),
+            actual_seq_kv=_stat(getattr(md, "actual_seq_lengths_kv", None)),
+            block_tables=_stat(getattr(md, "block_tables", None)),
+            topk=_stat(topk_indices),
+        )
 
     def _a5_zero_rope(self, reference, shape):
         # Cache the large pool-shaped dummy across graph captures/layers.
