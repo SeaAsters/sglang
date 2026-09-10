@@ -32,7 +32,7 @@ from sglang.srt.sampling.sampling_observer_pp import (
     pop_auxiliary_output_from_pp_tensors,
 )
 from sglang.srt.utils import DynamicGradMode, point_to_point_pyobj
-from sglang.srt.utils.common import is_xpu
+from sglang.srt.utils.common import is_npu, is_xpu
 
 logger = logging.getLogger(__name__)
 
@@ -1053,8 +1053,13 @@ class SchedulerPPMixin:
         # same time.
 
         # CUDA: send first
-        # XPU: even ranks send first, odd ranks recv first.
-        send_first = (not is_xpu()) or ((self.ps.pp_rank % 2) == 0)
+        # XPU/NPU: even ranks send first, odd ranks recv first.
+        # NPU: HCCL P2P can mutually deadlock when both sides of a pair post
+        # isend+irecv concurrently (2 active mb slots); parity ordering keeps
+        # one side receiving while the other sends.
+        send_first = ((not is_xpu()) and (not is_npu())) or (
+            (self.ps.pp_rank % 2) == 0
+        )
 
         def _do_send():
             return self._pp_send_output_to_next_stage(

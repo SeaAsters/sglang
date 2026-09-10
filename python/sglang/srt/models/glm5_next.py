@@ -1444,6 +1444,10 @@ class Glm5NextForConditionalGeneration(nn.Module):
 
         params_dict = dict(self.named_parameters())
         weight_names = []
+        # A visual weight that matches no parameter keeps its random init and
+        # only degrades multimodal accuracy (text stays correct), so track it.
+        visual_seen: set[str] = set()
+        visual_matched: set[str] = set()
         for name, loaded_weight in weights:
             is_visual_weight = "visual" in name
             if getattr(self, "encoder_only", False) and not is_visual_weight:
@@ -1462,6 +1466,9 @@ class Glm5NextForConditionalGeneration(nn.Module):
                 )
 
             weight_names.append(name)
+            visual_name = name if is_visual_weight else None
+            if visual_name is not None:
+                visual_seen.add(visual_name)
 
             if self.num_fused_shared_experts > 0 and "mlp.shared_experts" in name:
                 name = name.replace(
@@ -1523,6 +1530,8 @@ class Glm5NextForConditionalGeneration(nn.Module):
                     continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
+                if visual_name is not None:
+                    visual_matched.add(visual_name)
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
@@ -1604,7 +1613,21 @@ class Glm5NextForConditionalGeneration(nn.Module):
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
                     )
+                    if visual_name is not None:
+                        visual_matched.add(visual_name)
                     weight_loader(param, loaded_weight)
+
+        if not is_nextn:
+            unmatched_visual = {
+                n
+                for n in visual_seen - visual_matched
+                if "rotary_emb.inv_freq" not in n and "hc_head" not in n
+            }
+            if unmatched_visual:
+                raise RuntimeError(
+                    f"Visual weights matched no parameter and would stay "
+                    f"randomly initialized: {sorted(unmatched_visual)}"
+                )
 
         if getattr(self, "encoder_only", False):
             run_post = False
@@ -1624,6 +1647,21 @@ class Glm5NextForConditionalGeneration(nn.Module):
         DeepseekV2WeightLoaderMixin.post_load_weights(
             self, is_nextn=is_nextn, weight_names=weight_names
         )
+        # The DSA NPU forward path unconditionally bmm's w_kc; catch a silently
+        # skipped kv_b_proj post-process at load time instead of failing later
+        # inside CUDA-graph capture.
+        for layer_id in range(self.model.start_layer, self.model.end_layer):
+            attn = getattr(self.model.layers[layer_id], "self_attn", None)
+            if (
+                attn is not None
+                and getattr(attn, "use_dsa", False)
+                and attn.w_kc is None
+            ):
+                raise RuntimeError(
+                    f"post_load_weights left w_kc unset for DSA layer {layer_id} "
+                    f"(local layers [{self.model.start_layer}, {self.model.end_layer})); "
+                    "kv_b_proj was not processed"
+                )
 
     def load_kv_cache_scales(self, quantization_param_path: str) -> None:
         if self.model is None:
