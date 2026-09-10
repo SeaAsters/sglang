@@ -32,7 +32,7 @@ from sglang.srt.sampling.sampling_observer_pp import (
     pop_auxiliary_output_from_pp_tensors,
 )
 from sglang.srt.utils import DynamicGradMode, point_to_point_pyobj
-from sglang.srt.utils.common import is_xpu
+from sglang.srt.utils.common import is_npu, is_xpu, temp_debug_comm
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +112,14 @@ class SchedulerPPMixin:
                 self.cur_batch_for_debug = cur_batch
                 if cur_batch:
                     server_is_idle = False
+                    temp_debug_comm(
+                        "PP_PASS",
+                        mb=mb_id,
+                        mode=str(cur_batch.forward_mode),
+                        nreq=len(cur_batch.reqs),
+                    )
                     pp_proxy_tensors = self._pp_recv_proxy_tensors()
+                    temp_debug_comm("PP_PROXY_RECV_DONE", mb=mb_id)
                 next_pp_outputs = None
                 next_batch_result = None
                 d2h_event = None
@@ -132,6 +139,7 @@ class SchedulerPPMixin:
                         self.mb_metadata,
                         self.last_rank_comm_queue,
                     )
+                    temp_debug_comm("PP_LAUNCH_DONE", mb=mb_id)
                 if get_parallel().pp_async_batch_depth == 0:
                     next_pp_outputs, next_batch_result, d2h_event = (
                         self._pp_commit_send_output_work_and_preprocess_output_tensors(
@@ -140,7 +148,10 @@ class SchedulerPPMixin:
                         )
                     )
                 if self.mbs[next_mb_id] is not None:
+                    temp_debug_comm("PP_D2H_QUERY", mb=mb_id, nxt=next_mb_id, ev=d2h_event.query(), cp=self.copy_stream.query(), sc=self.schedule_stream.query(), fw=self.forward_stream.query(), le=(self.launch_event.query() if self.launch_event is not None else -1))
+                    temp_debug_comm("PP_D2H_ENTER", mb=mb_id, nxt=next_mb_id)
                     d2h_event.synchronize()
+                    temp_debug_comm("PP_D2H_DONE", mb=mb_id, nxt=next_mb_id)
                     with torch.profiler.record_function("process_batch_result"):
                         self._pp_process_batch_result(
                             self.mbs[next_mb_id],
@@ -160,6 +171,7 @@ class SchedulerPPMixin:
                                 async_send=True,
                                 msg_type="proxy",
                             )
+                            temp_debug_comm("PP_PROXY_STASHED", mb=mb_id)
 
                 self.pp_outputs = next_pp_outputs
 
@@ -1053,16 +1065,22 @@ class SchedulerPPMixin:
         # same time.
 
         # CUDA: send first
-        # XPU: even ranks send first, odd ranks recv first.
-        send_first = (not is_xpu()) or ((self.ps.pp_rank % 2) == 0)
+        # XPU/NPU: even ranks send first, odd ranks recv first.
+        # NPU: HCCL P2P can mutually deadlock when both sides of a pair post
+        # isend+irecv concurrently (2 active mb slots); parity ordering keeps
+        # one side receiving while the other sends.
+        send_first = ((not is_xpu()) and (not is_npu())) or (
+            (self.ps.pp_rank % 2) == 0
+        )
 
         def _do_send():
-            return self._pp_send_output_to_next_stage(
+            r = self._pp_send_output_to_next_stage(
                 next_first_rank_mb_id,
                 mbs,
                 last_rank_comm_queue,
                 pp_outputs,
             )
+            return r
 
         def _do_recv():
             nonlocal next_pp_outputs, batch_result, d2h_event

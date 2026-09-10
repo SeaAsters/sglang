@@ -182,6 +182,7 @@ class AscendRunnerCore(MoeRunnerCore):
                 group_list_type=group_list_type,
             )
 
+
             # --- Activation ---
             # Grouped-row activations require dispatch metadata.
             if isinstance(
@@ -197,6 +198,7 @@ class AscendRunnerCore(MoeRunnerCore):
                 hidden_states, pertoken_scale = self.activation._apply_activation(
                     hidden_states
                 )
+
 
         # --- w2 (down) projection ---
         hidden_states = self.config.layer.w2_kernel.apply(

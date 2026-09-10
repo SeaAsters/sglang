@@ -50,6 +50,7 @@ from sglang.srt.layers.dp_attention import (
 )
 from sglang.srt.layers.moe import should_use_dp_reduce_scatterv
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
+from sglang.srt.utils.common import temp_debug_comm
 
 
 def tp_all_gather_hidden_states(hidden_states, forward_batch):
@@ -57,6 +58,12 @@ def tp_all_gather_hidden_states(hidden_states, forward_batch):
         get_attn_tp_context().input_scattered
     ), "Input scattered guarantees same num tokens in TP group."
     total_tokens = forward_batch.input_ids.shape[0]
+    temp_debug_comm(
+        "tp_all_gather_hidden_states",
+        local_tokens=hidden_states.shape[0],
+        total_tokens=total_tokens,
+        tp_world=get_tp_group().world_size,
+    )
     output = hidden_states.new_empty((total_tokens, hidden_states.shape[-1]))
     get_tp_group().all_gather_into_tensor(output, hidden_states)
 
@@ -462,6 +469,11 @@ class MHCLayerCommunicator(LayerCommunicator):
         residual: torch.Tensor,
         forward_batch: ForwardBatch,
     ):
+        temp_debug_comm(
+            "prepare_attn_enter",
+            tokens=hidden_states.shape[0],
+            first_layer=self.is_first_layer,
+        )
         if self.is_first_layer:
             if get_attn_tp_context().input_scattered:
                 hidden_states, _ = tp_reduce_scatter(
@@ -475,11 +487,13 @@ class MHCLayerCommunicator(LayerCommunicator):
             hidden_states, out_norm=self.input_layernorm
         )
 
+        temp_debug_comm("prepare_attn_pre_simple", tokens=hidden_states.shape[0])
         hidden_states = self._communicate_simple_fn(
             hidden_states=hidden_states,
             forward_batch=forward_batch,
             context=self._context,
         )
+        temp_debug_comm("prepare_attn_post_simple", tokens=hidden_states.shape[0])
 
         # DSA and attention without a QKV hook consume full hidden states, so
         # gather them before attention.
@@ -507,6 +521,7 @@ class MHCLayerCommunicator(LayerCommunicator):
         forward_batch: ForwardBatch,
         cache=None,
     ):
+        temp_debug_comm("prepare_mlp_enter", tokens=hidden_states.shape[0])
         if cache is not None:
             self._context.cache = cache
 
@@ -518,10 +533,12 @@ class MHCLayerCommunicator(LayerCommunicator):
             context=self._context,
             mhc=self.mhc,
         )
+        temp_debug_comm("prepare_mlp_exit", tokens=hidden_states.shape[0])
 
         return hidden_states, residual
 
     def postprocess_layer(self, hidden_states, residual, forward_batch):
+        temp_debug_comm("postprocess_layer_enter", tokens=hidden_states.shape[0])
         hidden_states, residual = self._communicate_summable_tensor_pair_fn(
             hidden_states=hidden_states,
             residual=residual,
@@ -532,6 +549,7 @@ class MHCLayerCommunicator(LayerCommunicator):
             is_last_layer=self.is_last_layer,
         )
         self.mhc.reset_aux()
+        temp_debug_comm("postprocess_layer_exit", tokens=hidden_states.shape[0])
 
         return hidden_states, residual
 

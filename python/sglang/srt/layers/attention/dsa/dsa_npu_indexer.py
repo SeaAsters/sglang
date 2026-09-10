@@ -12,7 +12,6 @@ from sglang.srt.model_executor.forward_context import (
     get_token_to_kv_pool,
 )
 from sglang.srt.utils import is_npu
-
 if is_npu():
     import torch_npu
 

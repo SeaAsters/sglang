@@ -69,6 +69,7 @@ from sglang.srt.utils import (
     is_shm_available,
     is_xpu,
 )
+from sglang.srt.utils.common import temp_debug_comm
 from sglang.srt.utils.custom_op import register_custom_op
 from sglang.srt.utils.network import get_local_ip_auto
 from sglang.srt.utils.stale_shm_cleanup import make_shm_name
@@ -1728,7 +1729,9 @@ class GroupCoordinator:
         # Thus the net performance gain justifies this approach.
 
         send_func = torch.distributed.isend if async_send else torch.distributed.send
+        temp_debug_comm("PP_SD_ENTER", dst=dst, ntens=len(tensor_list), asy=async_send)
         p2p_works = self.send_object(metadata_list, dst=dst, async_send=async_send)
+        temp_debug_comm("PP_SD_META_DONE")
 
         for tensor in tensor_list:
             if tensor.numel() == 0:
@@ -1741,6 +1744,7 @@ class GroupCoordinator:
 
             comm_group = metadata_group if tensor.is_cpu else group
             work = send_func(tensor, self.ranks[dst], group=comm_group)
+            temp_debug_comm("PP_SD_TENSOR_ENQ", sz=tensor.numel())
             if async_send:
                 p2p_works.append(P2PWork(work, tensor))
         return p2p_works
@@ -1769,7 +1773,9 @@ class GroupCoordinator:
             src = (self.rank_in_group - 1) % self.world_size
         assert src < self.world_size, f"Invalid src rank ({src})"
 
+        temp_debug_comm("PP_RD_ENTER", src=src)
         recv_metadata_list = self.recv_object(src=src)
+        temp_debug_comm("PP_RD_META_DONE", nmeta=len(recv_metadata_list))
         tensor_dict: Dict[str, Any] = {}
         for key, value in recv_metadata_list:
             if isinstance(value, TensorMetadata):
@@ -1794,7 +1800,9 @@ class GroupCoordinator:
                 work = torch.distributed.irecv(
                     tensor, src=self.ranks[src], group=comm_group
                 )
+                temp_debug_comm("PP_RD_IRECV_POSTED", sz=tensor.numel())
                 work.wait()
+                temp_debug_comm("PP_RD_IRECV_DONE", sz=tensor.numel())
 
                 if use_all_gather:
                     tensor = all_gather_group.all_gather(tensor, dim=0)
