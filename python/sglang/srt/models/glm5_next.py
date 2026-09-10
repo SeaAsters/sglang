@@ -109,7 +109,6 @@ from sglang.srt.utils.common import (
     log_info_on_rank0,
     make_layers,
     set_weight_attrs,
-    temp_debug_comm,
 )
 
 if _use_aiter_gfx95:
@@ -551,12 +550,6 @@ class Glm5NextLinearAttention(nn.Module):
         if forward_batch.forward_mode.is_idle():
             return hidden_states
 
-        temp_debug_comm(
-            "kda_attn_enter",
-            layer=self.layer_idx,
-            tokens=hidden_states.shape[0],
-            fused=self.do_fuse_qkvbfg,
-        )
         if self.do_fuse_qkvbfg:
             mixed_qkv, beta, forget_gate, g_proj_states = self.forward_qkvbfg_fused(
                 hidden_states, forward_batch
@@ -581,9 +574,7 @@ class Glm5NextLinearAttention(nn.Module):
         core_attn_out = self.o_norm(core_attn_out, norm_gate)
         core_attn_out = core_attn_out.squeeze(0).flatten(-2)
 
-        out = self.o_proj(core_attn_out)[0]
-        temp_debug_comm("kda_attn_exit", layer=self.layer_idx)
-        return out
+        return self.o_proj(core_attn_out)[0]
 
 
 class Glm5NextDecoderLayer(nn.Module):

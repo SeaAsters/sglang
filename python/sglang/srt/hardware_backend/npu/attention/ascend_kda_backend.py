@@ -15,7 +15,6 @@ from sgl_kernel_npu.fla.solve_tril import solve_tril_npu
 from sgl_kernel_npu.fla.utils import prepare_chunk_indices
 
 from sglang.kernels.ops.attention.fla.cumsum import chunk_local_cumsum
-from sglang.srt.utils.common import temp_debug_comm
 from sglang.kernels.ops.attention.fla.kda import chunk_kda_scaled_dot_kkt_fwd
 from sglang.kernels.ops.attention.fla.l2norm import l2norm_fwd
 from sglang.srt.layers.attention.linear.kda_backend import (
@@ -270,9 +269,6 @@ class AscendKDAAttnBackend(KDAAttnBackend):
         conv_states = cache.conv[0]
         ssm_states = cache.temporal
 
-        temp_debug_comm(
-            "kda_extend_enter", layer=layer.layer_id, tokens=mixed_qkv.shape[0]
-        )
         if forward_batch.extend_prefix_lens is None:
             raise RuntimeError(
                 "extend_prefix_lens cannot be None in non-TARGET_VERIFY mode."
@@ -300,7 +296,6 @@ class AscendKDAAttnBackend(KDAAttnBackend):
             run_mode=0,
         )
         conv_states[:, -(kernel_size - 1) :, :] = conv_states_for_prefill
-        temp_debug_comm("kda_extend_conv_done", layer=layer.layer_id)
         q, k, v = mixed_qkv.split([layer.q_dim, layer.k_dim, layer.v_dim], dim=-1)
         q = q.unflatten(-1, (-1, layer.head_q_dim)).unsqueeze(0)
         k = k.unflatten(-1, (-1, layer.head_k_dim)).unsqueeze(0)
@@ -328,7 +323,6 @@ class AscendKDAAttnBackend(KDAAttnBackend):
                 self.forward_metadata.track_ssm_h_src if track_ssm else None
             ),
         )
-        temp_debug_comm("kda_extend_kernels_done", layer=layer.layer_id)
         if track_ssm:
             core_attn_out, h = core_attn_out
             self._track_mamba_state_extend(

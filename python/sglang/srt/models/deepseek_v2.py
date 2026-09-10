@@ -215,7 +215,6 @@ from sglang.srt.utils import (
     add_prefix,
     is_non_idle_and_non_empty,
     make_layers,
-    temp_debug_comm,
     use_intel_amx_backend,
 )
 from sglang.srt.utils.custom_op import register_custom_op
@@ -1268,12 +1267,6 @@ class DeepseekV2MoE(nn.Module):
         forward_batch: ForwardBatch,
         input_ids_global: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        temp_debug_comm(
-            "moe_enter",
-            layer=self.layer_id,
-            mode=forward_batch.forward_mode,
-            tokens=hidden_states.shape[0],
-        )
         shared_output = None
         sbo_enabled_flag = self._fuse_shared_experts_inside_sbo and not self.is_nextn
         sbo_overlap_dispatch_flag = (
@@ -1477,7 +1470,6 @@ class DeepseekV2MoE(nn.Module):
             hidden_states=hidden_states,
             topk_output=topk_output,
         )
-        temp_debug_comm("moe_exit", layer=self.layer_id)
 
         if (
             hidden_states.shape[0] > 0
@@ -2090,12 +2082,6 @@ class DeepseekV2AttentionMLA(
         llama_4_scaling: Optional[torch.Tensor] = None,
         prev_topk_indices: Optional[torch.Tensor] = None,
     ):
-        temp_debug_comm(
-            "attn_enter",
-            layer=self.layer_id,
-            mode=forward_batch.forward_mode,
-            tokens=hidden_states.shape[0] if not isinstance(hidden_states, tuple) else hidden_states[0].shape[0],
-        )
         s = self.forward_prepare(
             positions=positions,
             hidden_states=hidden_states,
@@ -2105,9 +2091,7 @@ class DeepseekV2AttentionMLA(
             llama_4_scaling=llama_4_scaling,
             prev_topk_indices=prev_topk_indices,
         )
-        out = self.forward_core(s)
-        temp_debug_comm("attn_exit", layer=self.layer_id)
-        return out
+        return self.forward_core(s)
 
     def forward_prepare(
         self,

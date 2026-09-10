@@ -115,33 +115,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 torch_release = pkg_version.parse(torch.__version__).release
 
-# TEMP-DEBUG(comm): per-layer collective/kernel tracer for the PP x DP-attention
-# deadlock investigation. Enable with SGLANG_TEMP_DEBUG_COMM=1. Remove once the
-# hang is root-caused.
-_temp_debug_comm_enabled: Optional[bool] = None
-
-
-def temp_debug_comm_enabled() -> bool:
-    global _temp_debug_comm_enabled
-    if _temp_debug_comm_enabled is None:
-        import os
-
-        _temp_debug_comm_enabled = (
-            os.environ.get("SGLANG_TEMP_DEBUG_COMM", "0") == "1"
-        )
-    return _temp_debug_comm_enabled
-
-
-def temp_debug_comm(event: str, **fields) -> None:
-    if not temp_debug_comm_enabled():
-        return
-    import time
-
-    extras = " ".join(f"{k}={v}" for k, v in fields.items())
-    logger.info(
-        "TEMP-DEBUG %s t=%.6f %s", event, time.monotonic(), extras
-    )
-
 
 # ==============================================================================
 # BEGIN: Multi-Device & CUDA Version Utilities

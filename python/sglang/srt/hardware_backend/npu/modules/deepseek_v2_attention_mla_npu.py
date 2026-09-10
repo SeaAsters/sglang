@@ -18,6 +18,7 @@ from sglang.srt.layers.attention.dsa.utils import (
 from sglang.srt.layers.communicator import ScatterMode, get_attn_tp_context
 from sglang.srt.model_executor.forward_context import get_token_to_kv_pool
 from sglang.srt.utils import is_npu_a5
+
 if TYPE_CHECKING:
     from sglang.srt.model_executor.forward_batch_info import ForwardBatch
     from sglang.srt.models.deepseek_v2 import DeepseekV2AttentionMLA

@@ -36,7 +36,6 @@ from sglang.srt.utils import (
     is_hip,
     is_npu,
     load_json_config,
-    temp_debug_comm,
 )
 
 _is_npu = is_npu()
@@ -67,48 +66,14 @@ import torch
 import torch.distributed as dist
 
 if use_deepep and _is_npu:
-    # TEMP-DEBUG: instrumented AlltoAll normal combine (bisection probes)
+    # NPU workaround: normal mode -> HCCL alltoall strategy (Cam IPC-window
+    # combine kernel deadlocks on ep rank 0 under cross-rank skew); LL stays
+    # default.
     import torch_npu
     from deep_ep import EventOverlap as _TDbEventOverlap
     from deep_ep.strategies.normal_strategy import (
         AlltoAllNormalCommStrategy as _TDbA2AStrategy,
-        DefaultNormalCommStrategy as _TDbDefStrategy,
     )
-
-    _TDb_orig_ic = _TDbDefStrategy._intranode_combine
-
-    def _TDb_ic(
-        self,
-        x,
-        handle,
-        topk_weights,
-        config,
-        previous_event,
-        async_finish,
-        allocate_on_comm_stream,
-        combine_send_cost_stats,
-    ):
-        temp_debug_comm("EP_ICMB_enter", tokens=x.shape[0])
-        recv_x, recv_topk_weights, event = _TDb_orig_ic(
-            self,
-            x,
-            handle,
-            topk_weights,
-            config,
-            previous_event,
-            async_finish,
-            allocate_on_comm_stream,
-            combine_send_cost_stats,
-        )
-        temp_debug_comm("EP_ICMB_kernel_enqueued", tokens=recv_x.shape[0])
-        torch.npu.current_stream().synchronize()
-        temp_debug_comm("EP_ICMB_curstream_synced", tokens=recv_x.shape[0])
-        return recv_x, recv_topk_weights, event
-
-    _TDbDefStrategy._intranode_combine = _TDb_ic
-
-    # TEMP-DEBUG WORKAROUND: normal mode -> HCCL alltoall strategy (Cam IPC-window
-    # combine kernel deadlocks on ep rank 0 under cross-rank skew); LL stays default.
     import deep_ep.ep_strategy as _TDbEps
 
     def _TDb_get_strategy(cls, deep_mode):
@@ -126,14 +91,9 @@ if use_deepep and _is_npu:
         sig = _TDbInspect.signature(_TDb_orig_a2a_dispatch)
         accepted = set(sig.parameters)
         filtered = {k: v for k, v in kwargs.items() if k in accepted}
-        dropped = [k for k in kwargs if k not in accepted]
-        if dropped:
-            temp_debug_comm("A2A_dispatch_dropped_kwargs", dropped=",".join(dropped))
         return _TDb_orig_a2a_dispatch(self, *args, **filtered)
 
     _TDbA2AStrategy.dispatch = _TDb_a2a_dispatch
-
-    _TDb_orig_combine = _TDbA2AStrategy.combine
 
     def _TDb_combine(
         self,
@@ -162,7 +122,6 @@ if use_deepep and _is_npu:
             and reversed_global_mapping is not None
         ):
             x = torch_npu.npu_moe_token_unpermute(x, reversed_global_mapping)
-        temp_debug_comm("A2A_COMBINE_pre_unpermute_done", tokens=x.shape[0])
 
         _, local_tokens, a2a_handle = self._async_all_to_all(
             x,
@@ -170,9 +129,7 @@ if use_deepep and _is_npu:
             output_splits,
             self.group,
         )
-        temp_debug_comm("A2A_COMBINE_a2a_enqueued", tokens=x.shape[0])
         a2a_handle.wait()
-        temp_debug_comm("A2A_COMBINE_a2a_wait_done", tokens=x.shape[0])
         x.untyped_storage().resize_(0)
 
         output = torch_npu.npu_moe_token_unpermute(
@@ -181,8 +138,6 @@ if use_deepep and _is_npu:
             probs=topk_weights_h,
             restore_shape=hidden_shape_before_permute,
         )
-        tokens_out = hidden_shape_before_permute[0]
-        temp_debug_comm("A2A_COMBINE_final_unpermute_done", tokens=tokens_out)
         output = output.view(hidden_shape)
 
         return output, None, _TDbEventOverlap()
@@ -662,14 +617,6 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
         return hidden_states, topk_ids, topk_weights, previous_event
 
     def dispatch_b(self, hidden_states, topk_ids, topk_weights, previous_event):
-        temp_debug_comm(
-            "deepep_dispatch_enter",
-            tokens=(
-                hidden_states.shape[0]
-                if not isinstance(hidden_states, tuple)
-                else hidden_states[0].shape[0]
-            ),
-        )
         (
             hidden_states,
             topk_ids,
@@ -678,7 +625,6 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
             event,
         ) = self._dispatch_core(hidden_states, topk_ids, topk_weights, previous_event)
         event.current_stream_wait() if self.async_finish else ()
-        temp_debug_comm("deepep_dispatch_exit")
 
         if isinstance(hidden_states, tuple):
             hidden_states, hidden_states_scale = hidden_states
@@ -771,12 +717,10 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
         return output, previous_event
 
     def combine_b(self, output, previous_event):
-        temp_debug_comm("deepep_combine_enter", tokens=output.shape[0])
         hidden_states, event = self._combine_core(output, previous_event)
         event.current_stream_wait() if self.async_finish else ()
         self.handle = None
         self.src2dst = None
-        temp_debug_comm("deepep_combine_exit")
         return hidden_states
 
     def _combine_core(self, x: torch.Tensor, previous_event):
