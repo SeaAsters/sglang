@@ -1,3 +1,17 @@
+# Keep the host launcher compiler workaround local to this service process.
+# This container's /usr/lib64/libm.so linker script points at missing /lib64
+# files. Prefer its valid aarch64 library directory without changing system libs.
+if [ -z "${CC:-}" ] && [ ! -e /lib64/libm.so.6 ] && [ -e /usr/lib/aarch64-linux-gnu/libm.so ]; then
+    hostcc_dir=$(mktemp -d /tmp/sglang-hostcc.XXXXXX) || exit 1
+    cat > "$hostcc_dir/clangxx" <<'HOSTCC'
+#!/bin/sh
+exec /usr/bin/clang++ -L/usr/lib/aarch64-linux-gnu "$@"
+HOSTCC
+    chmod +x "$hostcc_dir/clangxx"
+    export CC="$hostcc_dir/clangxx"
+    trap 'rm -f "$hostcc_dir/clangxx"; rmdir "$hostcc_dir"' EXIT
+fi
+
 export PYTHONPATH=`pwd`/python:$PYTHONPATH
 
 export SGLANG_ENABLE_JIT_DEEPGEMM=False
@@ -5,7 +19,7 @@ export SGLANG_OPT_DEEPGEMM_HC_PRENORM=False
 export SGLANG_OPT_USE_TILELANG_MHC_PRE=False
 export SGLANG_OPT_USE_TILELANG_MHC_POST=False
 export SGLANG_NPU_PROFILING=0
-export ASCEND_LAUNCH_BLOCKING=0
+export ASCEND_LAUNCH_BLOCKING=1
 export HCCL_BUFFSIZE=256
 
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
@@ -35,6 +49,9 @@ python3 -m sglang.launch_server \
         --max-running-requests 16 \
         --pre-warm-nccl \
         --quantization modelslim \
+        --speculative-draft-model-path $MODEL_PATH \
+        --speculative-draft-kv-cache-dtype bf16 \
+        --speculative-algorithm NEXTN --speculative-num-steps 4 --speculative-eagle-topk 1 --speculative-num-draft-tokens 5 \
         --watchdog-timeout 1200 \
         --cuda-graph-bs ${CUDA_GRAPH_BS} \
         --host 127.0.0.1 \
@@ -43,4 +60,6 @@ python3 -m sglang.launch_server \
         #--moe-a2a-backend deepep --deepep-mode auto \
         #${EXTRA_ARGS} \
         #--speculative-algorithm NEXTN --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4  \
+        #--speculative-draft-kv-cache-dtype bf16 \
+        #--speculative-algorithm NEXTN --speculative-num-steps 4 --speculative-eagle-topk 1 --speculative-num-draft-tokens 5 \
 
