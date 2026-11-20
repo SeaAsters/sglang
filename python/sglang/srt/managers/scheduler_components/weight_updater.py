@@ -501,6 +501,13 @@ class SchedulerWeightUpdaterManager:
         for tag in tags:
             self.offload_tags.add(tag)
 
+        # Drain in-flight kernels and D2H/H2D before any unmapping: the memory
+        # saver's pause (unmap) does not wait for the device, so a kernel or
+        # copy still touching a region would corrupt or fault once its
+        # physical pages are released. Same race as vllm-ascend #13757/#17666
+        # and the vLLM #52914 pause contract.
+        torch.get_device_module().synchronize()
+
         if GPU_MEMORY_TYPE_KV_CACHE in tags:
             if scheduler is not None:
                 # Held requests keep no KV and wait out the release.
@@ -522,6 +529,9 @@ class SchedulerWeightUpdaterManager:
             self.stashed_model_static_state = _export_static_state(
                 self.tp_worker.model_runner.model
             )
+            # The export enqueues D2H copies; they must land before the pages
+            # they read from are unmapped.
+            torch.get_device_module().synchronize()
             torch.distributed.barrier(self.tp_cpu_group)
             self.memory_saver_adapter.pause(GPU_MEMORY_TYPE_WEIGHTS)
 
